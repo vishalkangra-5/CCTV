@@ -1,0 +1,9 @@
+[Unit]
+Description=Camera portal recordings retention cleanup
+After=network.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/camera-portal/worker
+ExecStart=/opt/camera-portal/worker/venv/bin/python recordings_cleanup.py
+User=camportal

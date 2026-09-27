@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Camera Grid</title>
+<style>
+:root { --bg: #0b0d11; --panel: #151821; --border: #262a33; --accent: #3b82f6; --text: #e6e6e6; }
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font-family: system-ui, sans-serif; height: 100vh; display: flex; flex-direction: column; }
+header { display: flex; align-items: center; justify-content: space-between; padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--border); }
+header h1 { font-size: 16px; margin: 0; font-weight: 600; }
+.layouts button { background: #1f2330; border: 1px solid var(--border); color: var(--text); padding: 6px 12px; margin-left: 6px; border-radius: 4px; cursor: pointer; font-size: 13px; }
+.layouts button.active { background: var(--accent); border-color: var(--accent); }
+.pager { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.pager button { background: #1f2330; border: 1px solid var(--border); color: var(--text); padding: 4px 10px; border-radius: 4px; cursor: pointer; }
+#grid { flex: 1; display: grid; gap: 4px; padding: 4px; background: #000; overflow: hidden; }
+.tile { position: relative; background: #000; border: 1px solid #1c1f27; overflow: hidden; }
+.tile iframe { width: 100%; height: 100%; border: 0; display: block; }
+.tile .label-bar { position: absolute; top: 4px; left: 6px; right: 6px; display: flex; justify-content: space-between; align-items: center; z-index: 10; pointer-events: none; }
+.tile .label { font-size: 12px; background: rgba(0, 0, 0, .65); padding: 3px 8px; border-radius: 3px; pointer-events: auto; user-select: none; cursor: pointer; }
+.tile .fs-btn { background: rgba(0, 0, 0, .65); color: var(--text); border: 1px solid var(--border); padding: 2px 8px; border-radius: 3px; font-size: 12px; cursor: pointer; pointer-events: auto; }
+.tile .fs-btn:hover { background: var(--accent); }
+.tile.empty { display: flex; align-items: center; justify-content: center; color: #3a3f4b; font-size: 13px; }
+a.adminlink { color: #93c5fd; font-size: 13px; text-decoration: none; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Camera Grid</h1>
+  <div class="layouts" id="layouts">
+    <button data-n="1">1</button>
+    <button data-n="4">4</button>
+    <button data-n="8">8</button>
+    <button data-n="16">16</button>
+    <button data-n="32">32</button>
+  </div>
+  <div class="pager" id="pager"></div>
+  <button id="refreshAllBtn" title="Reload all camera streams" style="background:#1f2330;border:1px solid var(--border);color:var(--text);padding:6px 12px;border-radius:4px;cursor:pointer;font-size:13px;margin-left:8px">⟳ Refresh all</button>
+  <a class="adminlink" href="/cctv/admin/index.php">Admin panel</a>
+</header>
+<div id="grid"></div>
+
+<script>
+let cameras = [];
+let layout = 4;
+let page = 0;
+const GRID_COLS = { 1: 1, 4: 2, 8: 4, 16: 4, 32: 8 };
+
+function toggleTileFullscreen(tile) {
+  if (!document.fullscreenElement && !document.webkitFullscreenElement) {
+    if (tile.requestFullscreen) tile.requestFullscreen();
+    else if (tile.webkitRequestFullscreen) tile.webkitRequestFullscreen();
+  } else {
+    if (document.exitFullscreen) document.exitFullscreen();
+    else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
+  }
+}
+
+// A single camera on screen can afford the full-quality stream; swap back to
+// the lighter thumb stream the moment it's no longer fullscreen (including
+// exits via Esc, not just our own button).
+function handleFullscreenChange() {
+  const fsEl = document.fullscreenElement || document.webkitFullscreenElement;
+  document.querySelectorAll('#grid iframe').forEach(frame => {
+    const tile = frame.closest('.tile');
+    const shouldBeFull = tile === fsEl;
+    const target = shouldBeFull ? frame.dataset.fullUrl : frame.dataset.thumbUrl;
+    if (frame.dataset.streamUrl !== target) {
+      frame.dataset.streamUrl = target;
+      frame.src = target;
+    }
+  });
+}
+document.addEventListener('fullscreenchange', handleFullscreenChange);
+document.addEventListener('webkitfullscreenchange', handleFullscreenChange);
+
+function reloadTileFrame(tile) {
+  const frame = tile.querySelector('iframe');
+  if (frame && frame.dataset.streamUrl) {
+    // Re-assigning .src (rather than frame.contentWindow.location.reload())
+    // forces a full new WebRTC/MSE negotiation — a plain reload can get stuck
+    // reusing a dead peer connection, which is exactly what we're recovering from.
+    frame.src = 'about:blank';
+    requestAnimationFrame(() => { frame.src = frame.dataset.streamUrl; });
+  }
+}
+
+function reloadAllFrames() {
+  document.querySelectorAll('#grid iframe').forEach(frame => {
+    if (!frame.dataset.streamUrl) return;
+    frame.src = 'about:blank';
+    requestAnimationFrame(() => { frame.src = frame.dataset.streamUrl; });
+  });
+}
+
+async function loadCameras() {
+  try {
+    let res = await fetch('../api/cameras.php');
+    if (!res.ok) {
+      res = await fetch('/cctv/api/cameras.php');
+    }
+    const data = await res.json();
+    const fresh = data.cameras || [];
+    // This is the actual fix for streams reconnecting every ~60s: only
+    // rebuild the grid (which recreates every iframe, dropping every
+    // live connection) when the camera list genuinely changed — e.g. you
+    // added/removed/reordered a camera. A plain periodic poll finding the
+    // same list is not a reason to tear down every stream.
+    const changed = JSON.stringify(fresh) !== JSON.stringify(cameras);
+    cameras = fresh;
+    if (changed) render();
+  } catch (err) {
+    console.error('Camera fetch error:', err);
+  }
+}
+
+function totalPages() {
+  return Math.max(1, Math.ceil(cameras.length / layout));
+}
+
+function render() {
+  const grid = document.getElementById('grid');
+  const cols = GRID_COLS[layout] || 4;
+  const rows = Math.ceil(layout / cols);
+  grid.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
+  grid.style.gridTemplateRows = `repeat(${rows}, 1fr)`;
+  grid.innerHTML = '';
+
+  const start = page * layout;
+  const slice = cameras.slice(start, start + layout);
+
+  for (let i = 0; i < layout; i++) {
+    const tile = document.createElement('div');
+    tile.className = 'tile';
+    const cam = slice[i];
+
+    if (cam) {
+      const bar = document.createElement('div');
+      bar.className = 'label-bar';
+
+      const label = document.createElement('div');
+      label.className = 'label';
+      label.textContent = cam.label || ('Camera ' + (start + i + 1));
+      label.title = 'Double-click label for fullscreen';
+      label.ondblclick = () => toggleTileFullscreen(tile);
+
+      const fsBtn = document.createElement('button');
+      fsBtn.className = 'fs-btn';
+      fsBtn.textContent = 'Full';
+      fsBtn.title = 'Toggle Fullscreen';
+      fsBtn.onclick = () => toggleTileFullscreen(tile);
+
+      const reloadBtn = document.createElement('button');
+      reloadBtn.className = 'fs-btn';
+      reloadBtn.textContent = '⟳';
+      reloadBtn.title = 'Reload this stream';
+      reloadBtn.onclick = () => reloadTileFrame(tile);
+
+      bar.appendChild(label);
+      bar.appendChild(reloadBtn);
+      bar.appendChild(fsBtn);
+
+      const frame = document.createElement('iframe');
+      frame.allow = 'autoplay; fullscreen';
+      frame.dataset.thumbUrl = cam.thumb_url || cam.stream_url;
+      frame.dataset.fullUrl = cam.stream_url;
+      // Currently-active URL (what reload/keep-alive should reload to) —
+      // starts as the low-res thumb, switches to full on fullscreen toggle.
+      frame.dataset.streamUrl = frame.dataset.thumbUrl;
+      // Stagger initial connections instead of firing all of them at once —
+      // opening 8/16 streams simultaneously is what causes some to silently
+      // fail to negotiate on weaker devices/networks.
+      setTimeout(() => { frame.src = frame.dataset.streamUrl; }, i * 250);
+
+      tile.appendChild(frame);
+      tile.appendChild(bar);
+    } else {
+      tile.classList.add('empty');
+      tile.textContent = '-';
+    }
+    grid.appendChild(tile);
+  }
+  renderPager();
+}
+
+function renderPager() {
+  const pager = document.getElementById('pager');
+  const pages = totalPages();
+  if (pages <= 1) {
+    pager.innerHTML = '';
+    return;
+  }
+  pager.innerHTML = `<button id="prevPage">&lsaquo;</button><span>Page ${page + 1} / ${pages}</span><button id="nextPage">&rsaquo;</button>`;
+  document.getElementById('prevPage').onclick = () => {
+    page = (page - 1 + pages) % pages;
+    render();
+  };
+  document.getElementById('nextPage').onclick = () => {
+    page = (page + 1) % pages;
+    render();
+  };
+}
+
+document.getElementById('layouts').addEventListener('click', (e) => {
+  const btn = e.target.closest('button');
+  if (!btn) return;
+  document.querySelectorAll('#layouts button').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  layout = parseInt(btn.dataset.n, 10);
+  page = 0;
+  render();
+});
+
+document.querySelector('#layouts button[data-n="4"]').classList.add('active');
+document.getElementById('refreshAllBtn').onclick = reloadAllFrames;
+loadCameras();
+setInterval(loadCameras, 60000);
+// Periodic keep-alive reload: WebRTC/MSE connections can silently die on some
+// devices/networks (NAT rebinding, backgrounded tab, etc.) with no visible
+// error. Reloading every few minutes is a blunt but reliable fix — cheap for
+// go2rtc (just a fresh negotiation) and avoids depending on detecting the
+// stall, which is unreliable across webrtc/mse/mp4/mjpeg modes.
+setInterval(reloadAllFrames, 5 * 60000);
+</script>
+</body>
+</html>

@@ -1,0 +1,13 @@
+[Unit]
+Description=Camera Portal detection worker
+After=network.target mysql.service
+
+[Service]
+WorkingDirectory=/opt/camera-portal/worker
+ExecStart=/opt/camera-portal/worker/venv/bin/python main.py
+Restart=always
+RestartSec=5
+User=camportal
+
+[Install]
+WantedBy=multi-user.target
